@@ -20,39 +20,39 @@ class TrainConfig:
     eps: float = 1e-6
 
     # 优化超参
-    steps: int = 5000
-    lr: float = 1e-2
+    steps: int = 10000  # Increased for better convergence
+    lr: float = 5e-3  # Slightly reduced for stability
     weight_decay: float = 0.0
 
     # 数值稳定
-    grad_clip: Optional[float] = 1.0  # None 表示不裁剪
+    grad_clip: Optional[float] = 5.0  # Increased clip value
     proj_each_step: bool = True       # 每步投影回单位球面
 
     # 早停策略
     early_stop: bool = True
-    check_every: int = 50             # 每隔多少步做一次 feasibility 检查
+    check_every: int = 100            # Less frequent checks to save time
 
     # loss 形状
-    use_repulsion: bool = False       # 是否添加分散项（可选）
-    repulsion_alpha: float = 10.0
-    repulsion_lambda: float = 1e-3
+    use_repulsion: bool = True        # Enabled to help push points apart
+    repulsion_alpha: float = 20.0     # Increased for stronger repulsion near threshold
+    repulsion_lambda: float = 1e-2    # Increased lambda for more weight
 
     # 平滑最大违规（聚焦最糟糕点对）
     use_smooth_max: bool = True
-    smooth_max_alpha: float = 50.0     # 越大越近似 max
-    smooth_max_weight: float = 1.0     # 与总违规和的权重平衡
+    smooth_max_alpha: float = 100.0   # Increased for closer approximation to max
+    smooth_max_weight: float = 2.0    # Increased weight to focus on worst violations
 
     # 学习率调度
     use_scheduler: bool = True
-    scheduler_eta_min_ratio: float = 0.1  # 余弦调度的最小 lr 比例
+    scheduler_eta_min_ratio: float = 0.05  # Lower min ratio for more annealing
 
     # -----------------------------
     # NEW: 贪心初始化（泛化到任意维度）
     # -----------------------------
     init_method: str = "greedy"  # "random" | "greedy"
-    greedy_candidates: int = 2048
-    greedy_first_candidates: int = 8192  # 前几步用更大候选数更稳
-    greedy_first_steps: int = 8          # 前多少个点使用 greedy_first_candidates
+    greedy_candidates: int = 4096  # Increased for better initial points
+    greedy_first_candidates: int = 16384  # Increased for first steps
+    greedy_first_steps: int = 12          # Increased steps with more candidates
 
 
 @dataclass
@@ -85,42 +85,26 @@ def _set_seed(seed: Optional[int]) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
-def loss_vio(
-    U: torch.Tensor,
-    threshold: float = 0.5,
-    normalize: bool = True,
-) -> torch.Tensor:
-    """
-    软约束损失：sum_{i<j} [max(0, <u_i,u_j> - threshold)]^2
-    """
-    U_n = normalize_rows(U) if normalize else U
-    G = U_n @ U_n.T
-    vals = _upper_triangle_values(G)
-    vio = torch.clamp(vals - threshold, min=0.0)
-    return (vio * vio).sum()
-
-
 def loss_total(U: torch.Tensor, cfg: TrainConfig) -> torch.Tensor:
     """
     总损失：违规损失 + （可选）平滑最大 +（可选）分散项
+    为优化效率，一次计算 U_n 和 G，然后复用。
     """
-    L = loss_vio(U, threshold=cfg.threshold, normalize=True)
+    U_n = normalize_rows(U)
+    G = U_n @ U_n.T
+    vals = _upper_triangle_values(G)
+    vio = torch.clamp(vals - cfg.threshold, min=0.0)
+    L = (vio ** 2).sum()
 
     if cfg.use_smooth_max:
-        U_n = normalize_rows(U)
-        G = U_n @ U_n.T
-        vals = _upper_triangle_values(G)
-        excess = torch.clamp(vals - cfg.threshold, min=0.0)
+        excess = vio  # 已 clamp
         if excess.numel() > 0:
             smax = torch.logsumexp(cfg.smooth_max_alpha * excess, dim=0) / cfg.smooth_max_alpha
-            L = L + cfg.smooth_max_weight * smax
+            L += cfg.smooth_max_weight * smax
 
     if cfg.use_repulsion:
-        U_n = normalize_rows(U)
-        G = U_n @ U_n.T
-        vals = _upper_triangle_values(G)
-        rep = torch.exp(cfg.repulsion_alpha * vals).sum()
-        L = L + cfg.repulsion_lambda * rep
+        rep = torch.exp(cfg.repulsion_alpha * (vals - cfg.threshold)).sum()  # Shifted to focus repulsion around threshold
+        L += cfg.repulsion_lambda * rep
 
     return L
 
@@ -134,7 +118,7 @@ def init_U_random(
     m: int,
     n: int,
     device: torch.device,
-    dtype: torch.dtype = torch.float32,
+    dtype: torch.dtype = torch.float64,
     seed: Optional[int] = None,
 ) -> torch.Tensor:
     _set_seed(seed)
@@ -147,11 +131,11 @@ def init_U_greedy_maximin(
     m: int,
     n: int,
     device: torch.device,
-    dtype: torch.dtype = torch.float32,
+    dtype: torch.dtype = torch.float64,
     seed: Optional[int] = None,
-    candidates: int = 2048,
-    first_candidates: int = 8192,
-    first_steps: int = 8,
+    candidates: int = 4096,
+    first_candidates: int = 16384,
+    first_steps: int = 12,
 ) -> torch.Tensor:
     """
     贪心 maximin / farthest-point 初始化（泛化到任意 n, m）：
@@ -185,7 +169,7 @@ def init_U(
     m: int,
     n: int,
     device: torch.device,
-    dtype: torch.dtype = torch.float32,
+    dtype: torch.dtype = torch.float64,
     seed: Optional[int] = None,
     cfg: Optional[TrainConfig] = None,
 ) -> torch.Tensor:
@@ -203,7 +187,7 @@ def init_U(
             # fallback default params
             return init_U_greedy_maximin(
                 m=m, n=n, device=device, dtype=dtype, seed=seed,
-                candidates=2048, first_candidates=8192, first_steps=8
+                candidates=4096, first_candidates=16384, first_steps=12
             )
         return init_U_greedy_maximin(
             m=m,
@@ -238,7 +222,7 @@ def train_once(
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # 1) init (NEW: greedy)
-    U0 = init_U(m=m, n=n, device=device, dtype=torch.float32, seed=seed, cfg=cfg)
+    U0 = init_U(m=m, n=n, device=device, dtype=torch.float64, seed=seed, cfg=cfg)
     U = U0.clone().detach().requires_grad_(True)
 
     opt = torch.optim.Adam([U], lr=cfg.lr, weight_decay=cfg.weight_decay)
@@ -301,21 +285,21 @@ def train_once(
 
 @dataclass
 class SearchConfig:
-    num_restarts: int = 200
+    num_restarts: int = 50  # Increased for more chances to find feasible
     train_cfg: TrainConfig = field(default_factory=TrainConfig)
     device: Optional[torch.device] = None
-    dtype: torch.dtype = torch.float32
+    dtype: torch.dtype = torch.float64
     verbose: bool = False
 
     # 失败后的后续精炼设置
     post_refine_on_fail: bool = True
-    post_refine_steps: int = 4000
-    post_refine_lr: Optional[float] = None
+    post_refine_steps: int = 8000  # Increased refine steps
+    post_refine_lr: Optional[float] = 1e-4  # Lower lr for fine-tuning
 
     # 针对“接近阈值但未可行”的多候选精炼
-    refine_top_k: int = 5
-    refine_steps: int = 4000
-    refine_lr: Optional[float] = None
+    refine_top_k: int = 10  # More candidates to refine
+    refine_steps: int = 8000
+    refine_lr: Optional[float] = 1e-4
 
 
 @dataclass
@@ -379,7 +363,7 @@ def search_feasible(
     # 若未找到可行解，按靠近阈值的若干候选做精炼
     assert best_rep_overall is not None and best_U_overall is not None
     if cfg.post_refine_on_fail and len(candidates) > 0:
-        lr_ref = cfg.post_refine_lr if cfg.post_refine_lr is not None else max(1e-5, cfg.train_cfg.lr * 0.5)
+        lr_ref = cfg.post_refine_lr if cfg.post_refine_lr is not None else max(1e-5, cfg.train_cfg.lr * 0.2)
 
         if cfg.verbose:
             print(f"[refine] start top-{min(len(candidates), max(1, cfg.refine_top_k))} candidates; lr_ref={lr_ref}")
@@ -434,8 +418,8 @@ def search_feasible(
 @torch.no_grad()
 def mutate_U(
     U: torch.Tensor,
-    p_replace: float = 0.05,
-    noise_std: float = 0.01,
+    p_replace: float = 0.1,  # Increased replacement probability
+    noise_std: float = 0.02,  # Slightly increased noise
 ) -> torch.Tensor:
     """
     对构型做轻量“突变”：
@@ -460,8 +444,8 @@ def mutate_U(
 def bump_and_refine(
     U_start: torch.Tensor,
     cfg: TrainConfig,
-    steps: int = 2000,
-    lr: float = 5e-3,
+    steps: int = 8000,
+    lr: float = 1e-4,
     verbose: bool = False,
 ) -> TrainResult:
     """

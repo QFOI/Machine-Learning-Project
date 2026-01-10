@@ -13,8 +13,8 @@ def main():
     parser.add_argument("-n", type=int, default=3, help="空间维度 (Dimension)")
     parser.add_argument("-m", type=int, default=12, help="点集数量 (Number of points)")
     parser.add_argument("--restarts", type=int, default=5, help="随机重启次数")
-    parser.add_argument("--steps", type=int, default=5000, help="每次训练的最大步数")
-    parser.add_argument("--lr", type=float, default=0.01, help="学习率")
+    parser.add_argument("--steps", type=int, default=10000, help="每次训练的最大步数")
+    parser.add_argument("--lr", type=float, default=0.00005, help="学习率")
     parser.add_argument("--output", type=str, default="result.pt", help="结果保存路径")
     # 可选优化策略
     parser.add_argument("--threshold", type=float, default=0.5, help="内积阈值 (默认 0.5)")
